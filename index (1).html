@@ -1,0 +1,326 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Price Share App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://apis.google.com/js/api.js"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div id="root"></div>
+    <script type="text/babel">
+        function App() {
+            const [customers, setCustomers] = React.useState([]);
+            const [supplyLocations, setSupplyLocations] = React.useState([]);
+            const [prices, setPrices] = React.useState([]);
+            const [selectedCustomer, setSelectedCustomer] = React.useState(null);
+            const [selectedSupplyLocation, setSelectedSupplyLocation] = React.useState(null);
+            const [selectedDate, setSelectedDate] = React.useState(new Date().toISOString().split('T')[0]);
+            const [includeTransport, setIncludeTransport] = React.useState(true);
+            const [calculatedPrice, setCalculatedPrice] = React.useState(null);
+            const [isLoading, setIsLoading] = React.useState(true);
+            const [errorMessage, setErrorMessage] = React.useState('');
+
+            const API_KEY = 'AIzaSyAfjYj2nYIrXFI8arYLthFD87FLPjfE2sc'; // Replace with your Google API Key
+            const SPREADSHEET_ID = '956427799'; // Replace with your Spreadsheet ID
+
+            React.useEffect(() => {
+                // Load Google API Client
+                gapi.load('client', () => {
+                    gapi.client.init({
+                        apiKey: API_KEY,
+                        discoveryDocs: ['https://sheets.googleapis.com/$discovery/rest?version=v4'],
+                    }).then(() => {
+                        fetchData();
+                    }).catch(error => {
+                        setErrorMessage('Failed to initialize API: ' + error.message);
+                        setIsLoading(false);
+                    });
+                });
+            }, []);
+
+            const fetchData = async () => {
+                try {
+                    // Fetch Customers
+                    const customerResponse = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Customers!A2:F',
+                    });
+                    const customers = customerResponse.result.values
+                        ? customerResponse.result.values.map(row => ({
+                            customerName: row[0],
+                            shipToCode: row[1],
+                            supplyLocation1: row[2],
+                            rtd1: parseFloat(row[3]),
+                            supplyLocation2: row[4],
+                            rtd2: parseFloat(row[5]),
+                        }))
+                        : [];
+
+                    // Fetch SupplyLocations
+                    const locationResponse = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'SupplyLocations!A2:E',
+                    });
+                    const supplyLocations = locationResponse.result.values
+                        ? locationResponse.result.values.map(row => ({
+                            locationName: row[0],
+                            centralDuty: parseFloat(row[1]),
+                            transportRate: parseFloat(row[2]),
+                            vat1: parseFloat(row[3]),
+                            vat2: parseFloat(row[4]),
+                        }))
+                        : [];
+
+                    // Fetch Prices
+                    const priceResponse = await gapi.client.sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'Prices!A2:D',
+                    });
+                    const prices = priceResponse.result.values
+                        ? priceResponse.result.values.map(row => ({
+                            locationName: row[0],
+                            startDate: row[1],
+                            endDate: row[2],
+                            basePrice: parseFloat(row[3]),
+                        }))
+                        : [];
+
+                    setCustomers(customers);
+                    setSupplyLocations(supplyLocations);
+                    setPrices(prices);
+                    if (customers.length > 0) {
+                        setSelectedCustomer(customers[0]);
+                        setSelectedSupplyLocation(
+                            supplyLocations.find(loc => loc.locationName === customers[0].supplyLocation1)
+                        );
+                    }
+                    setIsLoading(false);
+                } catch (error) {
+                    setErrorMessage('Failed to load data: ' + error.message);
+                    setIsLoading(false);
+                }
+            };
+
+            const handleCustomerChange = (event) => {
+                const customer = customers.find(c => c.customerName === event.target.value);
+                setSelectedCustomer(customer);
+                setSelectedSupplyLocation(
+                    supplyLocations.find(loc => loc.locationName === customer.supplyLocation1)
+                );
+                setCalculatedPrice(null);
+            };
+
+            const handleLocationChange = (event) => {
+                const location = supplyLocations.find(loc => loc.locationName === event.target.value);
+                setSelectedSupplyLocation(location);
+                setCalculatedPrice(null);
+            };
+
+            const handleCalculate = () => {
+                if (!selectedCustomer || !selectedSupplyLocation) return;
+
+                const priceEntry = prices.find(p =>
+                    p.locationName === selectedSupplyLocation.locationName &&
+                    new Date(selectedDate) >= new Date(p.startDate) &&
+                    new Date(selectedDate) <= new Date(p.endDate)
+                );
+
+                if (!priceEntry) {
+                    setErrorMessage('No price found for this date and location.');
+                    setCalculatedPrice(null);
+                    return;
+                }
+
+                const rtd = selectedSupplyLocation.locationName === selectedCustomer.supplyLocation1
+                    ? selectedCustomer.rtd1
+                    : selectedCustomer.rtd2;
+
+                const transportCharges = includeTransport ? rtd * selectedSupplyLocation.transportRate : 0;
+                const priceBeforeTax = priceEntry.basePrice + selectedSupplyLocation.centralDuty + transportCharges;
+                const vatAmount = (priceBeforeTax * selectedSupplyLocation.vat1 / 100) + selectedSupplyLocation.vat2;
+                const finalPrice = priceBeforeTax + vatAmount;
+
+                setCalculatedPrice({
+                    priceBeforeTax,
+                    vatAmount,
+                    finalPrice,
+                    transportCharges,
+                    basePrice: priceEntry.basePrice,
+                });
+                setErrorMessage('');
+            };
+
+            const handleShare = () => {
+                if (!calculatedPrice) return;
+
+                const shareText = `
+                    Price for ${selectedCustomer.customerName} (${selectedCustomer.shipToCode}, ${selectedSupplyLocation.locationName}) on ${selectedDate}:
+                    Base Price: $${calculatedPrice.basePrice.toFixed(2)}
+                    Transport Charges: $${calculatedPrice.transportCharges.toFixed(2)}
+                    Price before Tax: $${calculatedPrice.priceBeforeTax.toFixed(2)}
+                    VAT Amount: $${calculatedPrice.vatAmount.toFixed(2)}
+                    Final Price: $${calculatedPrice.finalPrice.toFixed(2)}
+                    ${includeTransport ? '' : '(Ex Depot - No Transport Costs)'}
+                `.trim();
+
+                if (navigator.share) {
+                    navigator.share({ text: shareText })
+                        .catch(err => console.error('Share failed:', err));
+                } else {
+                    navigator.clipboard.writeText(shareText)
+                        .then(() => alert('Results copied to clipboard!'))
+                        .catch(err => console.error('Copy failed:', err));
+                }
+            };
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                    <h1 className="text-2xl font-bold mb-4 text-center">Price Share App</h1>
+
+                    {isLoading ? (
+                        <div className="text-center">
+                            <svg className="animate-spin h-8 w-8 mx-auto text-blue-500" viewBox="0 0 24 24">
+                                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                            </svg>
+                            <p>Loading data...</p>
+                        </div>
+                    ) : errorMessage ? (
+                        <p className="text-red-500 text-center">{errorMessage}</p>
+                    ) : customers.length === 0 || supplyLocations.length === 0 || prices.length === 0 ? (
+                        <p className="text-center">No data found.</p>
+                    ) : (
+                        <>
+                            <div className="mb-4">
+                                <label className="block text-lg font-medium mb-1">Select Customer</label>
+                                <select
+                                    value={selectedCustomer?.customerName || ''}
+                                    onChange={handleCustomerChange}
+                                    className="w-full p-2 border rounded"
+                                >
+                                    {customers.map(customer => (
+                                        <option key={customer.shipToCode} value={customer.customerName}>
+                                            {customer.customerName} ({customer.shipToCode})
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="mb-4">
+                                <label className="block text-lg font-medium mb-1">Select Supply Location</label>
+                                <select
+                                    value={selectedSupplyLocation?.locationName || ''}
+                                    onChange={handleLocationChange}
+                                    className="w-full p-2 border rounded"
+                                >
+                                    {selectedCustomer && supplyLocations
+                                        .filter(loc =>
+                                            loc.locationName === selectedCustomer.supplyLocation1 ||
+                                            loc.locationName === selectedCustomer.supplyLocation2
+                                        )
+                                        .map(loc => (
+                                            <option key={loc.locationName} value={loc.locationName}>
+                                                {loc.locationName}
+                                            </option>
+                                        ))}
+                                </select>
+                            </div>
+
+                            <div className="mb-4">
+                                <label className="block text-lg font-medium mb-1">Select Date</label>
+                                <input
+                                    type="date"
+                                    value={selectedDate}
+                                    onChange={e => setSelectedDate(e.target.value)}
+                                    className="w-full p-2 border rounded"
+                                />
+                            </div>
+
+                            <div className="mb-4 flex items-center">
+                                <input
+                                    type="checkbox"
+                                    checked={includeTransport}
+                                    onChange={e => setIncludeTransport(e.target.checked)}
+                                    className="mr-2"
+                                />
+                                <label className="text-lg">Include Transport Costs</label>
+                            </div>
+
+                            <button
+                                onClick={handleCalculate}
+                                className="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 mb-4"
+                            >
+                                Calculate Price
+                            </button>
+
+                            {calculatedPrice && (
+                                <div className="text-center">
+                                    <p className="text-lg font-medium">
+                                        Price for {selectedCustomer.customerName} ({selectedCustomer.shipToCode}, {selectedSupplyLocation.locationName}) on {selectedDate}:
+                                    </p>
+                                    <p>Base Price: ${calculatedPrice.basePrice.toFixed(2)}</p>
+                                    <p>Transport Charges: ${calculatedPrice.transportCharges.toFixed(2)}</p>
+                                    <p>Price before Tax: ${calculatedPrice.priceBeforeTax.toFixed(2)}</p>
+                                    <p>VAT Amount: ${calculatedPrice.vatAmount.toFixed(2)}</p>
+                                    <p className="text-xl font-bold">Final Price: ${calculatedPrice.finalPrice.toFixed(2)}</p>
+                                    <button
+                                        onClick={handleShare}
+                                        className="mt-4 w-full bg-green-500 text-white p-2 rounded hover:bg-green-600"
+                                    >
+                                        Share Price
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
